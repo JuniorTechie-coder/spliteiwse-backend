@@ -98,7 +98,7 @@ export async function loginUser(
         const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
 
         //Validate the fields
-        if ( cleanEmail !== ""  ||
+        if (
             typeof password !== "string" ||
             !password
         ) {
