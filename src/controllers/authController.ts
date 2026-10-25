@@ -28,11 +28,10 @@ export async function registerUser(
                 });
 
         }
-
         const cleanUsername = username.trim();
         const cleanEmail = email.trim().toLowerCase();
 
-        // 2. Check whether the username or email already exists
+        // 2. Check whether the username or email already exists and some validations 
         const existingUser = await pool.query(
             `SELECT user_id
         FROM users
@@ -53,10 +52,12 @@ export async function registerUser(
                 message: "password length must be minimum 8 !"
             })
         }
+
+
         3.//hash the password
         const hashedPassword = await bcrypt.hash(password, 12);
 
-        //4.Insert the new user
+        //4.Insert the new user in Database 
         const result = await pool.query(
             `INSERT INTO users(username, email, hashed_password)
         VALUES($1, $2, $3)
@@ -88,6 +89,7 @@ export async function registerUser(
     }
 }
 
+
 //Login Logic
 export async function loginUser(
     req: Request<{}, {}, LoginRequestBody>,
@@ -99,8 +101,10 @@ export async function loginUser(
 
         //Validate the fields
         if (
+             typeof email !== "string" ||
+              !email.trim() ||
             typeof password !== "string" ||
-            !password
+              !password
         ) {
             return res.status(400).json({
                 message: "Enter valid email and password!"
@@ -135,8 +139,23 @@ export async function loginUser(
 
         }
 
+        //retrieve and validate your environment secret:
+        const jwtSecret = process.env.JWT_ACCESS_SECRET;
+
+        if(!jwtSecret){
+            throw new Error("JWT_ACCESS_SECRET is not configured");
+        }
+
+        //generate the access token:
+        const accessToken = jwt.sign(
+            {userId: user.user_id },
+            jwtSecret,
+            {expiresIn: "15m" }
+        );
+
         return res.status(200).json({
             message: " Login Successful",
+            accessToken,
             user: {
                 user_id: user.user_id,
                 email: user.email,
