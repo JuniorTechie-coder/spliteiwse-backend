@@ -223,7 +223,78 @@ export async function addGroupMember(req: Request, res: Response) {
         }
 
         return res.status(500).json({
-            message: "Failed to add member",
+            error: "Failed to add member",
         });
     }
+}
+
+export async function getGroupMembers(req: Request, res: Response){
+    const groupId = Number(req.params.groupId);
+
+    if(!Number.isInteger(groupId) || groupId <= 0){
+        return res.status(400).json({
+            message: "GroupId must be positive!"
+        });
+    }
+ //Read the authenticated user's ID from req.user.
+    const userId = req.user?.userId;
+
+    if (!userId) {
+        return res.status(401).json({
+            message: "Authentication required",
+        });
+    }
+
+try{
+         const groupExistResult = await pool.query(
+        `SELECT 1
+        FROM "group" 
+        WHERE group_id = $1`,
+        [groupId]
+    );
+
+    if(groupExistResult.rows.length === 0){
+        return res.status(404).json({
+            message: " Group not found!"
+        });
+    }
+
+    //check wheather the authenticated user belong to that group 
+     const requesterMembership = await pool.query(
+            `SELECT 1
+             FROM member_group
+             WHERE group_id = $1
+               AND user_id = $2`,
+            [groupId, userId]
+        );
+
+        if(!requesterMembership.rows.length){
+          return res.status(403).json({
+            message: "User does not belong to this group!" 
+          });
+        }
+
+        //query to get users belonging to that group
+    const memberGroupResult = await pool.query(
+        `SELECT u.user_id, u.username, u.email
+        FROM users AS u
+        INNER JOIN member_group AS mg
+        ON u.user_id = mg.user_id 
+        WHERE mg.group_id = $1`,
+        [groupId],
+    );
+
+    return res.status(200).json({
+        message: "Fetched members successfully",
+        members: memberGroupResult.rows
+    })
+
+} catch(error) {
+      console.error("Fetch group member error:", error);
+
+      return res.status(500).json({
+        error: "Failed to fetch members!"
+      });
+}
+   
 }

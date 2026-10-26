@@ -4,6 +4,7 @@ import cors from 'cors'
 import { pool } from "./config/db.js"
 import authRoutes from "./routes/authRoutes.js"
 import groupRoutes from "./routes/groupRoutes.js";
+import expenseRoutes from "./routes/expenseRoutes.js";
 
 dotenv.config()
 
@@ -14,6 +15,7 @@ app.use(cors());
 app.use(express.json());
 app.use("/api/auth", authRoutes);
 app.use("/api/groups", groupRoutes);
+app.use("/api", expenseRoutes);
 
 
 
