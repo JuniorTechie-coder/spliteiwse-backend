@@ -1,4 +1,4 @@
-import type { Request, Response} from "express";
+import type { Request, Response } from "express";
 import { pool } from "../config/db.js";
 
 
@@ -16,7 +16,7 @@ export async function createExpense(req: Request, res: Response) {
 
     // 2. Validate group ID
     if (
-       typeof rawGroupId !== "string"||
+        typeof rawGroupId !== "string" ||
         !/^[1-9]\d*$/.test(rawGroupId)
     ) {
         return res.status(400).json({
@@ -77,7 +77,7 @@ export async function createExpense(req: Request, res: Response) {
         (id: unknown) =>
             !Number.isSafeInteger(id) || (id as number) <= 0
     );
-    
+
     //This rejects invalid values such as:
     if (hasInvalidParticipant) {
         return res.status(400).json({
@@ -154,7 +154,7 @@ export async function createExpense(req: Request, res: Response) {
                AND user_id = ANY($2::int[])`,
             [groupId, requiredUserIds]
         );
-         
+
         //this creates the unique users with id 
         const validMemberIds = new Set(
             membershipResult.rows.map(
@@ -242,5 +242,139 @@ export async function createExpense(req: Request, res: Response) {
     } finally {
         // Return connection to the pool
         client.release();
+    }
+}
+
+
+export async function getGroupExpenses(req: Request, res: Response) {
+  const rawGroupId = req.params.groupId;
+
+    if (
+    typeof rawGroupId !== "string" ||
+    !/^[1-9]\d*$/.test(rawGroupId)
+) {
+    return res.status(400).json({
+        message: "Invalid group ID",
+    });
+}
+
+const groupId = Number(rawGroupId);
+
+    const userId = req.user?.userId;
+    if (!userId) {
+        return res.status(401).json({
+            message: "Authentication is required!"
+        });
+    }
+
+    try {
+        //check group exist
+        const existingGroupResult = await pool.query(
+            `SELECT 1
+             FROM "group"
+             WHERE group_id = $1`,
+            [groupId]
+        );
+
+        if (existingGroupResult.rows.length === 0) {
+            return res.status(404).json({
+                message: " This group does not exist!"
+            });
+        }
+
+        //check Requester is a member
+        const requesterMember = await pool.query(
+            `SELECT 1
+            FROM member_group
+            WHERE group_id = $1
+            AND user_id = $2`,
+            [groupId, userId]
+        );
+
+        if (requesterMember.rows.length === 0) {
+            return res.status(403).json({
+                message: "User is not a member of this group!"
+            });
+        }
+
+        //this query retrieve expenses and their payer:
+        const expenseResult = await pool.query(
+            `SELECT
+               e.id,
+               e.group_id,
+               e.description,
+               e.total_amount_paise,
+               e.paid_by_user_id,
+               payer.username AS payer_username,
+               e.created_at
+            FROM expenses AS e
+            INNER JOIN users AS payer
+               ON payer.user_id = e.paid_by_user_id
+            WHERE e.group_id = $1
+            ORDER BY e.created_at DESC`,
+            [groupId]
+        );
+
+        const expenseIds = expenseResult.rows.map(
+    (expense) => expense.id
+);
+
+        if (expenseResult.rows.length === 0) {
+           return res.status(200).json({
+             expenses: [],
+           });
+    }
+
+    // const expense = expenseResult.rows;
+    // return res.status(200).json({
+    //     expense,
+    // })
+
+    //second query retrieve all splits for the returned expenses in one query
+    const splitResult = await pool.query(
+        `SELECT 
+           es.expense_id,
+           es.user_id,
+           u.username,
+           es.amount_owed_paise
+        FROM expense_splits AS es
+        INNER JOIN users AS u
+           ON u.user_id = es.user_id
+        WHERE es.expense_id = ANY($1::int[])
+        ORDER BY es.expense_id, es.user_id`,
+        [expenseIds]
+    );
+
+    //attach the splits to their expenses
+    const splitsByExpenseId = new Map<number, unknown[]>();
+
+for (const split of splitResult.rows) {
+    const existingSplits =
+        splitsByExpenseId.get(split.expense_id) ?? [];  
+
+    existingSplits.push(split);
+    splitsByExpenseId.set(
+        split.expense_id,
+        existingSplits
+    );
+}
+
+const expenses = expenseResult.rows.map((expense) => ({
+    ...expense,
+    splits: splitsByExpenseId.get(expense.id) ?? [],
+}));
+
+return res.status(200).json({
+    expenses,
+});
+
+
+    } catch(error){
+         console.error("Create expense error:", error);
+
+        return res.status(500).json({
+            message: "Failed to get expenses!",
+    });
+
     }
 }
