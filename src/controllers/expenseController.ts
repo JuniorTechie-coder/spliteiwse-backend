@@ -247,18 +247,18 @@ export async function createExpense(req: Request, res: Response) {
 
 
 export async function getGroupExpenses(req: Request, res: Response) {
-  const rawGroupId = req.params.groupId;
+    const rawGroupId = req.params.groupId;
 
     if (
-    typeof rawGroupId !== "string" ||
-    !/^[1-9]\d*$/.test(rawGroupId)
-) {
-    return res.status(400).json({
-        message: "Invalid group ID",
-    });
-}
+        typeof rawGroupId !== "string" ||
+        !/^[1-9]\d*$/.test(rawGroupId)
+    ) {
+        return res.status(400).json({
+            message: "Invalid group ID",
+        });
+    }
 
-const groupId = Number(rawGroupId);
+    const groupId = Number(rawGroupId);
 
     const userId = req.user?.userId;
     if (!userId) {
@@ -316,23 +316,23 @@ const groupId = Number(rawGroupId);
         );
 
         const expenseIds = expenseResult.rows.map(
-    (expense) => expense.id
-);
+            (expense) => expense.id
+        );
 
         if (expenseResult.rows.length === 0) {
-           return res.status(200).json({
-             expenses: [],
-           });
-    }
+            return res.status(200).json({
+                expenses: [],
+            });
+        }
 
-    // const expense = expenseResult.rows;
-    // return res.status(200).json({
-    //     expense,
-    // })
+        // const expense = expenseResult.rows;
+        // return res.status(200).json({
+        //     expense,
+        // })
 
-    //second query retrieve all splits for the returned expenses in one query
-    const splitResult = await pool.query(
-        `SELECT 
+        //second query retrieve all splits for the returned expenses in one query
+        const splitResult = await pool.query(
+            `SELECT 
            es.expense_id,
            es.user_id,
            u.username,
@@ -342,39 +342,138 @@ const groupId = Number(rawGroupId);
            ON u.user_id = es.user_id
         WHERE es.expense_id = ANY($1::int[])
         ORDER BY es.expense_id, es.user_id`,
-        [expenseIds]
-    );
+            [expenseIds]
+        );
 
-    //attach the splits to their expenses
-    const splitsByExpenseId = new Map<number, unknown[]>();
+        //attach the splits to their expenses
+        const splitsByExpenseId = new Map<number, unknown[]>();
 
-for (const split of splitResult.rows) {
-    const existingSplits =
-        splitsByExpenseId.get(split.expense_id) ?? [];  
+        for (const split of splitResult.rows) {
+            const existingSplits =
+                splitsByExpenseId.get(split.expense_id) ?? [];
 
-    existingSplits.push(split);
-    splitsByExpenseId.set(
-        split.expense_id,
-        existingSplits
-    );
-}
+            existingSplits.push(split);
+            splitsByExpenseId.set(
+                split.expense_id,
+                existingSplits
+            );
+        }
 
-const expenses = expenseResult.rows.map((expense) => ({
-    ...expense,
-    splits: splitsByExpenseId.get(expense.id) ?? [],
-}));
+        const expenses = expenseResult.rows.map((expense) => ({
+            ...expense,
+            splits: splitsByExpenseId.get(expense.id) ?? [],
+        }));
 
-return res.status(200).json({
-    expenses,
-});
+        return res.status(200).json({
+            expenses,
+        });
 
 
-    } catch(error){
-         console.error("Create expense error:", error);
+    } catch (error) {
+        console.error("Create expense error:", error);
 
         return res.status(500).json({
             message: "Failed to get expenses!",
-    });
+        });
 
     }
+}
+
+export async function getGroupBalances(req: Request, res: Response) {
+    const rawGroupId = req.params.groupId;
+
+    if (
+        typeof rawGroupId !== "string" ||
+        !/^[1-9]\d*$/.test(rawGroupId)
+    ) {
+        return res.status(400).json({
+            message: "Invalid group ID",
+        });
+    }
+
+    const groupId = Number(rawGroupId);
+
+    const userId = req.user?.userId;
+    if (!userId) {
+        return res.status(401).json({
+            message: "Authentication is required!"
+        });
+    }
+
+    try {
+        const groupExist = await pool.query(
+            `SELECT 1
+        FROM "group"
+        WHERE group_id = $1`,
+            [groupId]
+        );
+
+        if (groupExist.rows.length === 0) {
+            return res.status(404).json({
+                message: "This group does not exist!"
+            });
+        }
+
+        const validGroupMember = await pool.query(
+            `SELECT 1
+         FROM member_group AS mg
+         WHERE group_id = $1
+         AND user_id = $2`,
+            [groupId, userId]
+        );
+
+        if (validGroupMember.rows.length === 0) {
+            return res.status(403).json({
+                message: "user must be the member of the group!"
+            });
+        }
+
+        const balanceResult = await pool.query(
+            `WITH payments AS (
+    SELECT
+        paid_by_user_id AS user_id,
+        SUM(total_amount_paise) AS total_paid_paise
+    FROM expenses
+    WHERE group_id = $1
+    GROUP BY paid_by_user_id
+),
+shares AS (
+    SELECT
+        es.user_id,
+        SUM(es.amount_owed_paise) AS total_owed_paise
+    FROM expense_splits AS es
+    INNER JOIN expenses AS e
+        ON e.id = es.expense_id
+    WHERE e.group_id = $1
+    GROUP BY es.user_id
+)
+    SELECT
+        u.user_id,
+        u.username,
+        COALESCE(p.total_paid_paise, 0) AS total_paid_paise,
+        COALESCE(s.total_owed_paise, 0) AS total_owed_paise,
+        COALESCE(p.total_paid_paise, 0)
+        - COALESCE(s.total_owed_paise, 0) AS net_balance_paise
+    FROM member_group AS mg
+    INNER JOIN users AS u
+        ON u.user_id = mg.user_id
+    LEFT JOIN payments AS p
+        ON p.user_id = u.user_id
+    LEFT JOIN shares AS s
+        ON s.user_id = u.user_id
+    WHERE mg.group_id = $1
+    ORDER BY u.user_id`,
+    [groupId]
+    );
+
+     return res.status(200).json({
+        balances: balanceResult.rows,
+    });
+    } catch (error) {
+    console.error("Fetch group balances error:", error);
+
+    return res.status(500).json({
+        message: "Failed to fetch group balances",
+    });
+}
 }

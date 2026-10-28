@@ -1,6 +1,6 @@
 // expenseRoutes.ts
 import { Router } from "express";
-import { createExpense, getGroupExpenses } from "../controllers/expenseController.js";
+import { createExpense, getGroupExpenses, getGroupBalances } from "../controllers/expenseController.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 
 const router = Router();
@@ -11,5 +11,6 @@ router.post(
     createExpense
 );
 router.get("/groups/:groupId/expenses", authMiddleware, getGroupExpenses);
+router.get("/groups/:groupId/balances", authMiddleware, getGroupBalances);
 
 export default router;
