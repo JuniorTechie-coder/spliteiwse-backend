@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { pool } from "../config/db.js";
+import { fetchGroupBalances } from "../services/balanceService.js";
 
 
 export async function createExpense(req: Request, res: Response) {
@@ -393,6 +394,13 @@ export async function getGroupBalances(req: Request, res: Response) {
 
     const groupId = Number(rawGroupId);
 
+    //Ensure groupId is a safe integer
+    if (!Number.isSafeInteger(groupId)) {
+    return res.status(400).json({
+        message: "Invalid group ID",
+    });
+}
+
     const userId = req.user?.userId;
     if (!userId) {
         return res.status(401).json({
@@ -428,47 +436,11 @@ export async function getGroupBalances(req: Request, res: Response) {
             });
         }
 
-        const balanceResult = await pool.query(
-            `WITH payments AS (
-    SELECT
-        paid_by_user_id AS user_id,
-        SUM(total_amount_paise) AS total_paid_paise
-    FROM expenses
-    WHERE group_id = $1
-    GROUP BY paid_by_user_id
-),
-shares AS (
-    SELECT
-        es.user_id,
-        SUM(es.amount_owed_paise) AS total_owed_paise
-    FROM expense_splits AS es
-    INNER JOIN expenses AS e
-        ON e.id = es.expense_id
-    WHERE e.group_id = $1
-    GROUP BY es.user_id
-)
-    SELECT
-        u.user_id,
-        u.username,
-        COALESCE(p.total_paid_paise, 0) AS total_paid_paise,
-        COALESCE(s.total_owed_paise, 0) AS total_owed_paise,
-        COALESCE(p.total_paid_paise, 0)
-        - COALESCE(s.total_owed_paise, 0) AS net_balance_paise
-    FROM member_group AS mg
-    INNER JOIN users AS u
-        ON u.user_id = mg.user_id
-    LEFT JOIN payments AS p
-        ON p.user_id = u.user_id
-    LEFT JOIN shares AS s
-        ON s.user_id = u.user_id
-    WHERE mg.group_id = $1
-    ORDER BY u.user_id`,
-    [groupId]
-    );
+        const balances = await fetchGroupBalances(groupId);
 
-     return res.status(200).json({
-        balances: balanceResult.rows,
-    });
+        return res.status(200).json({
+            balances,
+        });
     } catch (error) {
     console.error("Fetch group balances error:", error);
 
@@ -477,3 +449,6 @@ shares AS (
     });
 }
 }
+
+
+
