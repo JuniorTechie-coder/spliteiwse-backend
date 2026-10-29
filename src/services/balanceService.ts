@@ -8,18 +8,21 @@ export type GroupMemberBalance = {
     net_balance_paise: number;
 };
 
-export async function fetchGroupBalances(groupId: number){
+export async function fetchGroupBalances(
+    groupId: number
+): Promise<GroupMemberBalance[]> {
 
     //Balances fetch query
      const balanceResult = await pool.query(
-            `WITH payments AS (
+`WITH payments AS (
     SELECT
         paid_by_user_id AS user_id,
         SUM(total_amount_paise) AS total_paid_paise
     FROM expenses
     WHERE group_id = $1
     GROUP BY paid_by_user_id
-),
+    ),
+    
 shares AS (
     SELECT
         es.user_id,
@@ -49,5 +52,32 @@ shares AS (
     [groupId]
     );
 
-    return balanceResult.rows;
+    const balances = balanceResult.rows.map((row): GroupMemberBalance => {
+        const userId = Number(row.user_id);
+        const totalPaidPaise = Number(row.total_paid_paise);
+        const totalOwedPaise = Number(row.total_owed_paise);
+        const netBalancePaise = Number(row.net_balance_paise);
+
+        if (
+            !Number.isSafeInteger(userId) ||
+            userId <= 0 ||
+            typeof row.username !== "string" ||
+            row.username.trim().length === 0 ||
+            !Number.isSafeInteger(totalPaidPaise) ||
+            !Number.isSafeInteger(totalOwedPaise) ||
+            !Number.isSafeInteger(netBalancePaise)
+        ) {
+            throw new Error("Invalid balance data returned from database");
+        }
+
+        return {
+            user_id: userId,
+            username: row.username,
+            total_paid_paise: totalPaidPaise,
+            total_owed_paise: totalOwedPaise,
+            net_balance_paise: netBalancePaise,
+        };
+    });
+
+    return balances;
 }
