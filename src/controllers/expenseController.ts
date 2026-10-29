@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { pool } from "../config/db.js";
 import { fetchGroupBalances } from "../services/balanceService.js";
+import { calculateSettlements } from "../services/settlementService.js";
 
 
 export async function createExpense(req: Request, res: Response) {
@@ -450,5 +451,87 @@ export async function getGroupBalances(req: Request, res: Response) {
 }
 }
 
+export async function getSettlementSuggestions(req: Request, res: Response) {
+ 
+    try{ 
+        const rawGroupId = req.params.groupId;
+
+   if (
+        typeof rawGroupId !== "string" ||
+        !/^[1-9]\d*$/.test(rawGroupId)
+    ) {
+        return res.status(400).json({
+            message: "Invalid group ID",
+        });
+    }
 
 
+    const groupId = Number(rawGroupId);
+
+    if (!Number.isSafeInteger(groupId)) {
+    return res.status(400).json({
+        message: "Invalid group ID",
+    });
+}
+    const userId = req.user?.userId;
+
+    if(!userId){
+        return res.status(401).json({
+            message: "User is not authenticated",
+        });
+    }
+     
+     //check if group exist 
+      const groupExist = await pool.query(
+            `SELECT 1
+        FROM "group"
+        WHERE group_id = $1`,
+            [groupId]
+        );
+
+        if (groupExist.rows.length === 0) {
+            return res.status(404).json({
+                message: "This group does not exist!"
+            });
+        }
+
+        //check user belong to that group 
+        const validGroupMember = await pool.query(
+            `SELECT 1
+         FROM member_group AS mg
+         WHERE group_id = $1
+         AND user_id = $2`,
+            [groupId, userId]
+        );
+
+        if (validGroupMember.rows.length === 0) {
+            return res.status(403).json({
+                message: "user must be the member of the group!"
+            });
+        }
+
+
+    const balances = await fetchGroupBalances(groupId);
+
+    const settlements = calculateSettlements(
+        balances.map((balance) => ({
+          user_id: balance.user_id,
+          username: balance.username,
+          net_balance_paise: balance.net_balance_paise,
+        }))
+    );
+
+    return res.status(200).json({
+        settlements,
+    });
+
+}  catch (error) {
+    console.error("Fetch settlement suggestions error:", error);
+
+    return res.status(500).json({
+        message: "Failed to calculate settlement suggestions",
+    });
+}
+   
+
+}
