@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import { pool } from "../config/db.js";
 import { fetchGroupBalances } from "../services/balanceService.js";
 import { calculateSettlements } from "../services/settlementService.js";
-
+import {fetchBilateralDebt} from "../services/bilateralDebtService.js";
 
 export async function createExpense(req: Request, res: Response) {
     //Read the group ID
@@ -533,5 +533,197 @@ export async function getSettlementSuggestions(req: Request, res: Response) {
     });
 }
    
+
+}
+
+export async function recordSettlement(req: Request, res: Response){
+
+    const rawGroupId = req.params.groupId;
+
+    if(
+        typeof rawGroupId !== "string" ||
+         !/^[1-9]\d*$/.test(rawGroupId)
+    ){
+     return res.status(400).json({
+        message: "Invalid group ID",
+     });
+    }
+         const groupId = Number(rawGroupId);
+    if(!Number.isSafeInteger(groupId)){
+    return res.status(400).json({
+        message: "Invalid group Id"
+    });
+    }
+
+    const userId = req.user?.userId;
+    if(!userId){
+        return res.status(401).json({
+            message: "User is not Authenticated!"
+        });
+    }
+
+    const{ to_user_id, amount_paise } = req.body;
+
+    if (
+    !Number.isSafeInteger(to_user_id) ||
+    to_user_id <= 0
+) {
+    return res.status(400).json({
+        message: "to_user_id must be a positive safe integer",
+    });
+}
+
+if (
+    !Number.isSafeInteger(amount_paise) ||
+    amount_paise <= 0
+) {
+    return res.status(400).json({
+        message: "amount_paise must be a positive safe integer",
+    });
+}
+
+//Reject paying yourself 
+if (to_user_id === userId) {
+    return res.status(400).json({
+        message: "You cannot settle with yourself",
+    });
+}
+
+
+const client = await pool.connect();
+try{
+   //start transaction
+   await client.query("BEGIN");
+
+    //group exist check 
+ const groupExist = await client.query(
+        `SELECT 1
+         FROM "group"
+         WHERE group_id = $1`,
+        [groupId]
+    );
+
+    if (groupExist.rowCount === 0) {
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+            message: "Group does not exist",
+        });
+    }
+
+    //Lock payer and recievers rows
+     const lockMembers = await client.query(
+        `SELECT user_id
+        FROM member_group
+        WHERE group_id = $1 
+        AND user_id = ANY($2::int[])
+        ORDER BY user_id
+        FOR UPDATE`,
+        [groupId, [userId, to_user_id]]
+     )
+
+     if(lockMembers.rowCount !== 2){
+    await client.query("ROLLBACK");
+    
+       return res.status(403).json({
+        message: "Both users must belong to the group",
+    });
+     }
+
+
+    //payer belongs to this group validation
+    const payerMembership = await client.query(
+        `SELECT 1
+         FROM member_group
+         WHERE user_id = $1 
+         AND group_id = $2`,
+         [userId, groupId]
+    )
+
+    if(payerMembership.rows.length === 0){
+    await client.query("ROLLBACK");
+
+     return res.status(403).json({
+        message: "Payer must be the member of the group!"
+     })
+    }
+
+
+    //reciever belongs to this group validation
+     const receiverMembership = await client.query(
+        `SELECT 1
+        FROM member_group
+        WHERE user_id = $1
+        AND group_id = $2`,
+        [to_user_id, groupId]
+     )
+
+     if(receiverMembership.rows.length === 0){
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+            message: "Receiver must be the member of the group!"
+        })
+     }
+
+     //calling the fetchBilateralDept service
+     //Then this line recalculates the debt:
+     const outstandingDebt = await fetchBilateralDebt(
+    client,
+    groupId,
+    userId,
+    to_user_id
+);
+
+//Validate amount
+if(outstandingDebt <= 0){
+    await client.query("ROLLBACK");
+
+    return res.status(400).json({
+        message: "No outstanding debt in this direction"
+    });
+}
+
+if(amount_paise > outstandingDebt){
+    await client.query("ROLLBACK");
+
+    return res.status(400).json({
+        message: "Payment exceeds outstanding debt"
+    });
+}
+
+//Insert amount
+const settlementResult = await client.query(
+    `INSERT INTO settlements
+        (group_id, from_user_id, to_user_id, amount_paise)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [groupId, userId, to_user_id, amount_paise]
+);
+
+await client.query("COMMIT");
+
+return res.status(201).json({
+    message: "Settlement recorded successfully",
+    settlement: settlementResult.rows[0],
+});
+
+
+} catch (error) {
+    try{
+        await client.query("ROLLBACK");
+    }catch(rollbackError){
+        console.error("Rollback failed", rollbackError);
+    }
+
+
+    console.error("Record settlement error:", error);
+
+    return res.status(500).json({
+        message: "Failed to record settlement",
+    });
+} finally {
+    client.release();
+}  
 
 }

@@ -6,6 +6,8 @@ export type GroupMemberBalance = {
     total_paid_paise: number;   
      total_owed_paise: number;
     net_balance_paise: number;
+    total_settlements_received_paise: number;
+    total_settlements_paid_paise: number;
 };
 
 export async function fetchGroupBalances(
@@ -14,6 +16,7 @@ export async function fetchGroupBalances(
 
     //Balances fetch query
      const balanceResult = await pool.query(
+
 `WITH payments AS (
     SELECT
         paid_by_user_id AS user_id,
@@ -21,8 +24,7 @@ export async function fetchGroupBalances(
     FROM expenses
     WHERE group_id = $1
     GROUP BY paid_by_user_id
-    ),
-    
+),
 shares AS (
     SELECT
         es.user_id,
@@ -32,24 +34,56 @@ shares AS (
         ON e.id = es.expense_id
     WHERE e.group_id = $1
     GROUP BY es.user_id
-)
+),
+settlements_received AS (
     SELECT
-        u.user_id,
-        u.username,
-        COALESCE(p.total_paid_paise, 0) AS total_paid_paise,
-        COALESCE(s.total_owed_paise, 0) AS total_owed_paise,
-        COALESCE(p.total_paid_paise, 0)
-        - COALESCE(s.total_owed_paise, 0) AS net_balance_paise
-    FROM member_group AS mg
-    INNER JOIN users AS u
-        ON u.user_id = mg.user_id
-    LEFT JOIN payments AS p
-        ON p.user_id = u.user_id
-    LEFT JOIN shares AS s
-        ON s.user_id = u.user_id
-    WHERE mg.group_id = $1
-    ORDER BY u.user_id`,
-    [groupId]
+        to_user_id AS user_id,
+        SUM(amount_paise) AS total_settlements_received_paise
+    FROM settlements
+    WHERE group_id = $1
+    GROUP BY to_user_id
+),
+settlements_paid AS (
+    SELECT
+        from_user_id AS user_id,
+        SUM(amount_paise) AS total_settlements_paid_paise
+    FROM settlements
+    WHERE group_id = $1
+    GROUP BY from_user_id
+)
+SELECT
+    u.user_id,
+    u.username,
+
+    COALESCE(p.total_paid_paise, 0) AS total_paid_paise,
+    COALESCE(s.total_owed_paise, 0) AS total_owed_paise,
+
+    COALESCE(sr.total_settlements_received_paise, 0)
+        AS total_settlements_received_paise,
+
+    COALESCE(sp.total_settlements_paid_paise, 0)
+        AS total_settlements_paid_paise,
+
+   COALESCE(p.total_paid_paise, 0)
+- COALESCE(s.total_owed_paise, 0)
++ COALESCE(sp.total_settlements_paid_paise, 0)
+- COALESCE(sr.total_settlements_received_paise, 0)
+AS net_balance_paise
+
+FROM member_group AS mg
+INNER JOIN users AS u
+    ON u.user_id = mg.user_id
+LEFT JOIN payments AS p
+    ON p.user_id = u.user_id
+LEFT JOIN shares AS s
+    ON s.user_id = u.user_id
+LEFT JOIN settlements_received AS sr
+    ON sr.user_id = u.user_id
+LEFT JOIN settlements_paid AS sp
+    ON sp.user_id = u.user_id
+WHERE mg.group_id = $1
+ORDER BY u.user_id;`,
+[groupId]
     );
 
     const balances = balanceResult.rows.map((row): GroupMemberBalance => {
@@ -57,7 +91,16 @@ shares AS (
         const totalPaidPaise = Number(row.total_paid_paise);
         const totalOwedPaise = Number(row.total_owed_paise);
         const netBalancePaise = Number(row.net_balance_paise);
+        
 
+
+        const totalSettlementsReceivedPaise = Number(
+    row.total_settlements_received_paise
+);
+
+const totalSettlementsPaidPaise = Number(
+    row.total_settlements_paid_paise
+);
         if (
             !Number.isSafeInteger(userId) ||
             userId <= 0 ||
@@ -65,7 +108,9 @@ shares AS (
             row.username.trim().length === 0 ||
             !Number.isSafeInteger(totalPaidPaise) ||
             !Number.isSafeInteger(totalOwedPaise) ||
-            !Number.isSafeInteger(netBalancePaise)
+            !Number.isSafeInteger(netBalancePaise)||
+            !Number.isSafeInteger(totalSettlementsReceivedPaise)||
+            !Number.isSafeInteger(totalSettlementsPaidPaise)
         ) {
             throw new Error("Invalid balance data returned from database");
         }
@@ -75,7 +120,12 @@ shares AS (
             username: row.username,
             total_paid_paise: totalPaidPaise,
             total_owed_paise: totalOwedPaise,
+            total_settlements_received_paise:
+        totalSettlementsReceivedPaise,
+            total_settlements_paid_paise:
+        totalSettlementsPaidPaise,
             net_balance_paise: netBalancePaise,
+           
         };
     });
 
