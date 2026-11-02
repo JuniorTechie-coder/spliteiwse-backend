@@ -14,29 +14,23 @@ export function authMiddleware(
     });
   }
 
-  const authHeader = req.headers.authorization;
+  const token = req.cookies?.accessToken;
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  if (!token || typeof token !== "string") {
     return res.status(401).json({
-      message: "Authorization header is missing or invalid",
+      message: "Authentication Required",
     });
   }
 
-  const accessToken = authHeader.slice("Bearer ".length).trim();
-
-  if (!accessToken) {
-    return res.status(401).json({
-      message: "Access token is missing",
-    });
-  }
 
   try {
-    const decodedToken = jwt.verify(accessToken, jwtSecret);
+    const decodedToken = jwt.verify(token, jwtSecret);
 
     if (
       typeof decodedToken === "string" ||
       typeof decodedToken.userId !== "number" ||
-      !Number.isInteger(decodedToken.userId)
+      !Number.isInteger(decodedToken.userId) ||
+      decodedToken.userId <= 0
     ) {
       return res.status(401).json({
         message: "Invalid access token payload",

@@ -153,18 +153,21 @@ export async function loginUser(
             {expiresIn: "15m" }
         );
 
-        return res.status(200).json({
-            message: " Login Successful",
-            accessToken,
-            user: {
-                user_id: user.user_id,
-                email: user.email,
-            },
+
+        res.cookie("accessToken", accessToken, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: "lax",
+          path: "/",
+          maxAge: 15 * 60 * 1000,
         });
-        // return res.status(200).json({
-        //  message: "User found",
-        //  user: existingEmail.rows[0],
-        // });
+
+        return res.status(200).json({
+            message: "Login successful"
+        });
+
+        
+       
     } catch (error) {
          console.error("Login Error: ", error); 
         return res.status(500).json({
@@ -177,5 +180,17 @@ export async function loginUser(
 
 }
 
+export async function logoutUser(req: Request, res: Response){
+res.clearCookie("accessToken", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === " production",
+    sameSite : "lax",
+    path: "/",
+});
+
+return res.status(200).json({
+    message: "Logout successful!",
+});
+}
 
 

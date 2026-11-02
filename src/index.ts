@@ -5,6 +5,7 @@ import { pool } from "./config/db.js"
 import authRoutes from "./routes/authRoutes.js"
 import groupRoutes from "./routes/groupRoutes.js";
 import expenseRoutes from "./routes/expenseRoutes.js";
+import cookieParser from 'cookie-parser'
 
 dotenv.config()
 
@@ -13,6 +14,7 @@ const PORT = process.env.PORT || 5000
 
 app.use(cors());
 app.use(express.json());
+app.use(cookieParser());
 app.use("/api/auth", authRoutes);
 app.use("/api/groups", groupRoutes);
 app.use("/api", expenseRoutes);
