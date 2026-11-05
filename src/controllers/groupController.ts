@@ -23,7 +23,6 @@ export async function createGroup(req: Request, res: Response) {
             message: "Authentication required",
 
         });
-
     }
 
     const created_by_user_id = userId;
@@ -87,12 +86,9 @@ export async function getUserGroups(req: Request, res: Response) {
         });
     }
 
-
     const client = await pool.connect();
     try {
         await client.query("BEGIN");
-
-
 
         const groupResult = await client.query(
             ` SELECT 
@@ -103,6 +99,7 @@ export async function getUserGroups(req: Request, res: Response) {
     INNER JOIN member_group AS mg
        ON g.group_id = mg.group_id
     WHERE mg.user_id = $1
+    AND mg.is_active = TRUE
     ORDER BY g.created_at DESC`,
             [userId]
         );
@@ -128,10 +125,11 @@ export async function getUserGroups(req: Request, res: Response) {
     }
 }
 
+
 export async function addGroupMember(req: Request, res: Response) {
     const groupId = Number(req.params.groupId);
 
-    if (!Number.isInteger(groupId) || groupId <= 0) {
+    if (!Number.isSafeInteger(groupId) || groupId <= 0) {
         return res.status(400).json({
             message: "groupId must be a positive integer",
         });
@@ -157,36 +155,45 @@ export async function addGroupMember(req: Request, res: Response) {
         });
     }
 
+    const client = await pool.connect();
+
     try {
-        const existingGroupResult = await pool.query(
+        await client.query("BEGIN");
+
+        const existingGroupResult = await client.query(
             `SELECT group_id, group_name, created_at
              FROM "group"
-             WHERE group_id = $1`,
+             WHERE group_id = $1
+             FOR UPDATE`,
             [groupId]
         );
 
         if (existingGroupResult.rows.length === 0) {
+            await client.query("ROLLBACK");
+
             return res.status(404).json({
                 message: "Group not found",
             });
         }
 
-        const requesterMembership = await pool.query(
+        const requesterMembership = await client.query(
             `SELECT 1
              FROM member_group AS mg
-             WHERE group_id = $1
-               AND user_id = $2
+             WHERE mg.group_id = $1
+               AND mg.user_id = $2
                AND mg.is_active = TRUE`,
-              [groupId, userId]
+            [groupId, userId]
         );
 
         if (requesterMembership.rows.length === 0) {
+            await client.query("ROLLBACK");
+
             return res.status(403).json({
                 message: "You do not belong to this group",
             });
         }
 
-        const targetUserResult = await pool.query(
+        const targetUserResult = await client.query(
             `SELECT user_id, email
              FROM users
              WHERE email = $1`,
@@ -194,6 +201,8 @@ export async function addGroupMember(req: Request, res: Response) {
         );
 
         if (targetUserResult.rows.length === 0) {
+            await client.query("ROLLBACK");
+
             return res.status(404).json({
                 message: "User not found",
             });
@@ -201,19 +210,39 @@ export async function addGroupMember(req: Request, res: Response) {
 
         const targetUserId = targetUserResult.rows[0].user_id;
 
-        const memberResult = await pool.query(
+        const memberResult = await client.query(
             `INSERT INTO member_group
                 (group_id, user_id, net_balance_paise)
-             VALUES ($1, $2, $3)
-             RETURNING user_id, group_id, net_balance_paise`,
-            [groupId, targetUserId, 0]
+             VALUES ($1, $2, 0)
+             ON CONFLICT (user_id, group_id)
+             DO UPDATE
+             SET is_active = TRUE
+             WHERE member_group.is_active = FALSE
+             RETURNING user_id, group_id, net_balance_paise, is_active`,
+            [groupId, targetUserId]
         );
+
+        if (memberResult.rows.length === 0) {
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                message: "User is already an active member of this group",
+            });
+        }
+
+        await client.query("COMMIT");
 
         return res.status(201).json({
             message: "Member added successfully",
             member: memberResult.rows[0],
         });
     } catch (error) {
+        try {
+            await client.query("ROLLBACK");
+        } catch (rollbackError) {
+            console.error("Add group member rollback failed:", rollbackError);
+        }
+
         console.error("Add group member error:", error);
 
         if (
@@ -230,6 +259,8 @@ export async function addGroupMember(req: Request, res: Response) {
         return res.status(500).json({
             error: "Failed to add member",
         });
+    } finally {
+        client.release();
     }
 }
 
@@ -269,7 +300,8 @@ export async function getGroupMembers(req: Request, res: Response) {
             `SELECT 1
              FROM member_group
              WHERE group_id = $1
-               AND user_id = $2`,
+               AND user_id = $2
+               AND is_active = TRUE`,
             [groupId, userId]
         );
 
