@@ -110,11 +110,12 @@ export async function createExpense(req: Request, res: Response) {
         // 7. Begin transaction
         await client.query("BEGIN");
 
-        // 8. Check whether group exists
+        // 8. Check whether group exists and add Group-level Lock
         const groupResult = await client.query(
             `SELECT 1
              FROM "group"
-             WHERE group_id = $1`,
+             WHERE group_id = $1
+             FOR UPDATE`,
             [groupId]
         );
 
@@ -126,12 +127,14 @@ export async function createExpense(req: Request, res: Response) {
             });
         }
 
+
         // 9. Check whether requester belongs to group
         const requesterMembership = await client.query(
             `SELECT 1
-             FROM member_group
-             WHERE user_id = $1
-               AND group_id = $2`,
+             FROM member_group AS mg
+             WHERE mg.user_id = $1
+               AND mg.group_id = $2
+               AND mg.is_active = TRUE`,
             [requesterId, groupId]
         );
 
@@ -151,9 +154,10 @@ export async function createExpense(req: Request, res: Response) {
         //This checks which users belongs to tha group 
         const membershipResult = await client.query(
             `SELECT user_id
-             FROM member_group
-             WHERE group_id = $1
-               AND user_id = ANY($2::int[])`,
+             FROM member_group AS mg
+             WHERE mg.group_id = $1
+               AND mg.user_id = ANY($2::int[])
+               AND mg.is_active = TRUE`,
             [groupId, requiredUserIds]
         );
 
@@ -287,9 +291,10 @@ export async function getGroupExpenses(req: Request, res: Response) {
         //check Requester is a member
         const requesterMember = await pool.query(
             `SELECT 1
-            FROM member_group
-            WHERE group_id = $1
-            AND user_id = $2`,
+            FROM member_group AS mg
+            WHERE mg.group_id = $1
+            AND mg.user_id = $2
+            AND mg.is_active = TRUE`,
             [groupId, userId]
         );
 
@@ -426,8 +431,9 @@ export async function getGroupBalances(req: Request, res: Response) {
         const validGroupMember = await pool.query(
             `SELECT 1
          FROM member_group AS mg
-         WHERE group_id = $1
-         AND user_id = $2`,
+         WHERE mg.group_id = $1
+         AND mg.user_id = $2
+         AND mg.is_active = TRUE`,
             [groupId, userId]
         );
 
@@ -499,8 +505,9 @@ export async function getSettlementSuggestions(req: Request, res: Response) {
         const validGroupMember = await pool.query(
             `SELECT 1
          FROM member_group AS mg
-         WHERE group_id = $1
-         AND user_id = $2`,
+         WHERE mg.group_id = $1
+         AND mg.user_id = $2
+         AND mg.is_active = TRUE`,
             [groupId, userId]
         );
 
@@ -595,13 +602,13 @@ try{
    //start transaction
    await client.query("BEGIN");
 
-    //group exist check 
- const groupExist = await client.query(
-        `SELECT 1
-         FROM "group"
-         WHERE group_id = $1`,
-        [groupId]
-    );
+     //group exist check 
+     const groupExist = await client.query(
+         `SELECT 1
+          FROM "group"
+          WHERE group_id = $1`,
+         [groupId]
+     );
 
     if (groupExist.rowCount === 0) {
         await client.query("ROLLBACK");
@@ -614,9 +621,10 @@ try{
     //Lock payer and recievers rows
      const lockMembers = await client.query(
         `SELECT user_id
-        FROM member_group
-        WHERE group_id = $1 
-        AND user_id = ANY($2::int[])
+        FROM member_group AS mg
+        WHERE mg.group_id = $1 
+        AND mg.user_id = ANY($2::int[])
+        AND mg.is_active = TRUE
         ORDER BY user_id
         FOR UPDATE`,
         [groupId, [userId, to_user_id]]
@@ -634,9 +642,10 @@ try{
     //payer belongs to this group validation
     const payerMembership = await client.query(
         `SELECT 1
-         FROM member_group
-         WHERE user_id = $1 
-         AND group_id = $2`,
+         FROM member_group AS mg
+         WHERE mg.user_id = $1 
+         AND mg.group_id = $2
+         AND mg.is_active = TRUE`,
          [userId, groupId]
     )
 
@@ -652,9 +661,10 @@ try{
     //reciever belongs to this group validation
      const receiverMembership = await client.query(
         `SELECT 1
-        FROM member_group
-        WHERE user_id = $1
-        AND group_id = $2`,
+         FROM member_group AS mg
+         WHERE mg.user_id = $1
+         AND mg.group_id = $2
+         AND mg.is_active = TRUE`,
         [to_user_id, groupId]
      )
 
@@ -727,3 +737,8 @@ return res.status(201).json({
 }  
 
 }
+
+
+
+
+

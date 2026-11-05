@@ -173,10 +173,11 @@ export async function addGroupMember(req: Request, res: Response) {
 
         const requesterMembership = await pool.query(
             `SELECT 1
-             FROM member_group
+             FROM member_group AS mg
              WHERE group_id = $1
-               AND user_id = $2`,
-            [groupId, userId]
+               AND user_id = $2
+               AND mg.is_active = TRUE`,
+              [groupId, userId]
         );
 
         if (requesterMembership.rows.length === 0) {
@@ -284,7 +285,8 @@ export async function getGroupMembers(req: Request, res: Response) {
         FROM users AS u
         INNER JOIN member_group AS mg
         ON u.user_id = mg.user_id 
-        WHERE mg.group_id = $1`,
+        WHERE mg.group_id = $1
+            AND mg.is_active = TRUE`,
             [groupId],
         );
 
@@ -419,7 +421,7 @@ targetMemberId <= 0
      //user do exist in member group 
      const member = activeMember.rows[0];
 
-     const balance = await fetchGroupBalances(groupId);
+     const balance = await fetchGroupBalances(groupId, client);
 
 
      const targetBalance = balance.find(
@@ -490,9 +492,5 @@ return res.status(200).json({
 }finally {
     client.release();
 }
-
-
-
-
 
 }

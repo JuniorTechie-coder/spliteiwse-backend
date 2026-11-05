@@ -1,4 +1,5 @@
 import { pool } from "../config/db.js";
+import type { PoolClient } from "pg";
 
 export type GroupMemberBalance = {
     user_id: number;
@@ -10,12 +11,17 @@ export type GroupMemberBalance = {
     total_settlements_paid_paise: number;
 };
 
+
+
 export async function fetchGroupBalances(
-    groupId: number
+    groupId: number,
+    client?: PoolClient
 ): Promise<GroupMemberBalance[]> {
 
+    const db = client ?? pool;
+
     //Balances fetch query
-     const balanceResult = await pool.query(
+     const balanceResult = await db.query(
 
 `WITH payments AS (
     SELECT
