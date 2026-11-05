@@ -3,6 +3,16 @@ import { pool } from "../config/db.js";
 import { fetchGroupBalances } from "../services/balanceService.js";
 import { calculateSettlements } from "../services/settlementService.js";
 import {fetchBilateralDebt} from "../services/bilateralDebtService.js";
+import { withTransactionRetry } from "../services/transactionService.js";
+
+class RequestError extends Error {
+    constructor(
+        public status: number,
+        message: string
+    ) {
+        super(message);
+    }
+}
 
 export async function createExpense(req: Request, res: Response) {
     //Read the group ID
@@ -103,12 +113,10 @@ export async function createExpense(req: Request, res: Response) {
         });
     }
 
-    //Start a database transaction
-    const client = await pool.connect();
 
     try {
-        // 7. Begin transaction
-        await client.query("BEGIN");
+        // 7. Transaction with retry helper function
+         const result = await withTransactionRetry(async (client) => {
 
         // 8. Check whether group exists and add Group-level Lock
         const groupResult = await client.query(
@@ -120,13 +128,8 @@ export async function createExpense(req: Request, res: Response) {
         );
 
         if (groupResult.rowCount === 0) {
-            await client.query("ROLLBACK");
-
-            return res.status(404).json({
-                message: "Group not found",
-            });
+            throw new RequestError(404, "Group not found");
         }
-
 
         // 9. Check whether requester belongs to group
         const requesterMembership = await client.query(
@@ -139,11 +142,10 @@ export async function createExpense(req: Request, res: Response) {
         );
 
         if (requesterMembership.rowCount === 0) {
-            await client.query("ROLLBACK");
-
-            return res.status(403).json({
-                message: "You are not a member of this group",
-            });
+            throw new RequestError(
+                403,
+                "User should belong to this group!"
+            );
         }
 
         // 10. Check payer and all participants belong to group
@@ -173,11 +175,10 @@ export async function createExpense(req: Request, res: Response) {
         );
 
         if (invalidMembers.length > 0) {
-            await client.query("ROLLBACK");
-
-            return res.status(400).json({
-                message: "Payer and participants must belong to this group",
-            });
+            throw new RequestError(
+                400,
+                "Payer and participants must belong to this group!"
+            );
         }
 
         // 11. Calculate equal splits, including any remainder
@@ -225,19 +226,24 @@ export async function createExpense(req: Request, res: Response) {
         }
 
         // 14. Commit only after all inserts succeed
-        await client.query("COMMIT");
+        return {
+            expense,
+            splits,
+        };
+
+        });
 
         return res.status(201).json({
             message: "Expense created successfully",
-            expense,
-            splits,
+            expense: result.expense,
+            splits: result.splits,
         });
+
     } catch (error) {
-        // Roll back the expense and any splits if something fails
-        try {
-            await client.query("ROLLBACK");
-        } catch (rollbackError) {
-            console.error("Expense rollback failed:", rollbackError);
+        if (error instanceof RequestError) {
+            return res.status(error.status).json({
+                message: error.message,
+            });
         }
 
         console.error("Create expense error:", error);
@@ -245,9 +251,6 @@ export async function createExpense(req: Request, res: Response) {
         return res.status(500).json({
             message: "Failed to create expense",
         });
-    } finally {
-        // Return connection to the pool
-        client.release();
     }
 }
 
@@ -543,202 +546,143 @@ export async function getSettlementSuggestions(req: Request, res: Response) {
 
 }
 
-export async function recordSettlement(req: Request, res: Response){
 
+export async function recordSettlement(req: Request, res: Response) {
     const rawGroupId = req.params.groupId;
 
-    if(
+    if (
         typeof rawGroupId !== "string" ||
-         !/^[1-9]\d*$/.test(rawGroupId)
-    ){
-     return res.status(400).json({
-        message: "Invalid group ID",
-     });
+        !/^[1-9]\d*$/.test(rawGroupId)
+    ) {
+        return res.status(400).json({
+            message: "Invalid group ID",
+        });
     }
-         const groupId = Number(rawGroupId);
-    if(!Number.isSafeInteger(groupId)){
-    return res.status(400).json({
-        message: "Invalid group Id"
-    });
+
+    const groupId = Number(rawGroupId);
+
+    if (!Number.isSafeInteger(groupId)) {
+        return res.status(400).json({
+            message: "Invalid group ID",
+        });
     }
 
     const userId = req.user?.userId;
-    if(!userId){
+
+    if (!userId) {
         return res.status(401).json({
-            message: "User is not Authenticated!"
+            message: "User is not authenticated",
         });
     }
 
-    const{ to_user_id, amount_paise } = req.body;
+    const { to_user_id, amount_paise } = req.body;
 
-    if (
-    !Number.isSafeInteger(to_user_id) ||
-    to_user_id <= 0
-) {
-    return res.status(400).json({
-        message: "to_user_id must be a positive safe integer",
-    });
-}
-
-if (
-    !Number.isSafeInteger(amount_paise) ||
-    amount_paise <= 0
-) {
-    return res.status(400).json({
-        message: "amount_paise must be a positive safe integer",
-    });
-}
-
-//Reject paying yourself 
-if (to_user_id === userId) {
-    return res.status(400).json({
-        message: "You cannot settle with yourself",
-    });
-}
-
-
-const client = await pool.connect();
-try{
-   //start transaction
-   await client.query("BEGIN");
-
-     //group exist check 
-     const groupExist = await client.query(
-         `SELECT 1
-          FROM "group"
-          WHERE group_id = $1`,
-         [groupId]
-     );
-
-    if (groupExist.rowCount === 0) {
-        await client.query("ROLLBACK");
-
-        return res.status(404).json({
-            message: "Group does not exist",
-        });
-    }
-
-    //Lock payer and recievers rows
-     const lockMembers = await client.query(
-        `SELECT user_id
-        FROM member_group AS mg
-        WHERE mg.group_id = $1 
-        AND mg.user_id = ANY($2::int[])
-        AND mg.is_active = TRUE
-        ORDER BY user_id
-        FOR UPDATE`,
-        [groupId, [userId, to_user_id]]
-     )
-
-     if(lockMembers.rowCount !== 2){
-    await client.query("ROLLBACK");
-    
-       return res.status(403).json({
-        message: "Both users must belong to the group",
-    });
-     }
-
-
-    //payer belongs to this group validation
-    const payerMembership = await client.query(
-        `SELECT 1
-         FROM member_group AS mg
-         WHERE mg.user_id = $1 
-         AND mg.group_id = $2
-         AND mg.is_active = TRUE`,
-         [userId, groupId]
-    )
-
-    if(payerMembership.rows.length === 0){
-    await client.query("ROLLBACK");
-
-     return res.status(403).json({
-        message: "Payer must be the member of the group!"
-     })
-    }
-
-
-    //reciever belongs to this group validation
-     const receiverMembership = await client.query(
-        `SELECT 1
-         FROM member_group AS mg
-         WHERE mg.user_id = $1
-         AND mg.group_id = $2
-         AND mg.is_active = TRUE`,
-        [to_user_id, groupId]
-     )
-
-     if(receiverMembership.rows.length === 0){
-        await client.query("ROLLBACK");
-
+    if (!Number.isSafeInteger(to_user_id) || to_user_id <= 0) {
         return res.status(400).json({
-            message: "Receiver must be the member of the group!"
-        })
-     }
-
-     //calling the fetchBilateralDept service
-     //Then this line recalculates the debt:
-     const outstandingDebt = await fetchBilateralDebt(
-    client,
-    groupId,
-    userId,
-    to_user_id
-);
-
-//Validate amount
-if(outstandingDebt <= 0){
-    await client.query("ROLLBACK");
-
-    return res.status(400).json({
-        message: "No outstanding debt in this direction"
-    });
-}
-
-if(amount_paise > outstandingDebt){
-    await client.query("ROLLBACK");
-
-    return res.status(400).json({
-        message: "Payment exceeds outstanding debt"
-    });
-}
-
-//Insert amount
-const settlementResult = await client.query(
-    `INSERT INTO settlements
-        (group_id, from_user_id, to_user_id, amount_paise)
-     VALUES ($1, $2, $3, $4)
-     RETURNING *`,
-    [groupId, userId, to_user_id, amount_paise]
-);
-
-await client.query("COMMIT");
-
-return res.status(201).json({
-    message: "Settlement recorded successfully",
-    settlement: settlementResult.rows[0],
-});
-
-
-} catch (error) {
-    try{
-        await client.query("ROLLBACK");
-    }catch(rollbackError){
-        console.error("Rollback failed", rollbackError);
+            message: "to_user_id must be a positive safe integer",
+        });
     }
 
+    if (!Number.isSafeInteger(amount_paise) || amount_paise <= 0) {
+        return res.status(400).json({
+            message: "amount_paise must be a positive safe integer",
+        });
+    }
 
-    console.error("Record settlement error:", error);
+    if (to_user_id === userId) {
+        return res.status(400).json({
+            message: "You cannot settle with yourself",
+        });
+    }
 
-    return res.status(500).json({
-        message: "Failed to record settlement",
-    });
-} finally {
-    client.release();
-}  
+    try {
+        const settlement = await withTransactionRetry(async (client) => {
 
+            // 1. Check whether the group exists
+            const groupExist = await client.query(
+                `SELECT 1
+                 FROM "group"
+                 WHERE group_id = $1`,
+                [groupId]
+            );
+
+            if (groupExist.rowCount === 0) {
+                throw new RequestError(404,"Group does not exist");
+            }
+
+            // 2. Lock both active membership rows
+            const lockMembers = await client.query(
+                `SELECT user_id
+                 FROM member_group AS mg
+                 WHERE mg.group_id = $1
+                   AND mg.user_id = ANY($2::int[])
+                   AND mg.is_active = TRUE
+                 ORDER BY user_id
+                 FOR UPDATE`,
+                [groupId, [userId, to_user_id]]
+            );
+
+            if (lockMembers.rowCount !== 2) {
+                throw new RequestError(
+                    403,
+                    "Both users must belong to the group",
+                    
+                );
+            }
+
+            // 3. Calculate current bilateral outstanding debt
+            const outstandingDebt = await fetchBilateralDebt(
+                client,
+                groupId,
+                userId,
+                to_user_id
+            );
+
+            if (outstandingDebt <= 0) {
+                throw new RequestError(
+                    400,
+                    "No outstanding debt in this direction",
+                    
+                );
+            }
+
+            if (amount_paise > outstandingDebt) {
+                throw new RequestError(
+                    400,
+                    "Payment exceeds outstanding debt",
+                    
+                );
+            }
+
+            // 4. Record settlement
+            const settlementResult = await client.query(
+                `INSERT INTO settlements
+                    (group_id, from_user_id, to_user_id, amount_paise)
+                 VALUES ($1, $2, $3, $4)
+                 RETURNING *`,
+                [groupId, userId, to_user_id, amount_paise]
+            );
+
+            return settlementResult.rows[0];
+        });
+
+        // The helper has committed successfully before reaching here.
+        return res.status(201).json({
+            message: "Settlement recorded successfully",
+            settlement,
+        });
+
+    } catch (error) {
+        if (error instanceof RequestError) {
+            return res.status(error.status).json({
+                message: error.message,
+            });
+        }
+
+        console.error("Record settlement error:", error);
+
+        return res.status(500).json({
+            message: "Failed to record settlement",
+        });
+    }
 }
-
-
-
-
-
