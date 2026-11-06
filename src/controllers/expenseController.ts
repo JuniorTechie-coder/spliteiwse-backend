@@ -602,7 +602,8 @@ export async function recordSettlement(req: Request, res: Response) {
             const groupExist = await client.query(
                 `SELECT 1
                  FROM "group"
-                 WHERE group_id = $1`,
+                 WHERE group_id = $1
+                  FOR UPDATE`,
                 [groupId]
             );
 

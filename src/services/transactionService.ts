@@ -1,4 +1,4 @@
-import type { PoolClient } from "pg";
+import type {Pool, PoolClient } from "pg";
 import { pool } from "../config/db.js";
 
 type TransactionOperation<T> = (
@@ -23,7 +23,8 @@ function isRetryableTransactionError(error: unknown): boolean {
 
 export async function withTransactionRetry<T>(
     operation: TransactionOperation<T>,
-    maxRetries = 3
+    maxRetries = 3,
+     connectionPool: Pool = pool
 ): Promise<T> {
     if (!Number.isInteger(maxRetries) || maxRetries < 0) {
         throw new Error("maxRetries must be a non-negative integer");
@@ -32,7 +33,7 @@ export async function withTransactionRetry<T>(
     let retryCount = 0;
 
     while (true) {
-        const client = await pool.connect();
+       const client = await connectionPool.connect();
         let transactionStarted = false;
 
         try {
