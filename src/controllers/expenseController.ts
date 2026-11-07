@@ -4,6 +4,11 @@ import { fetchGroupBalances } from "../services/balanceService.js";
 import { calculateSettlements } from "../services/settlementService.js";
 import {fetchBilateralDebt} from "../services/bilateralDebtService.js";
 import { withTransactionRetry } from "../services/transactionService.js";
+import {
+    createRequestHash,
+    claimIdempotencyKey,
+    completeIdempotencyKey,
+} from "../services/idempotencyService.js";
 
 class RequestError extends Error {
     constructor(
@@ -113,10 +118,55 @@ export async function createExpense(req: Request, res: Response) {
         });
     }
 
+//authentication check
+const idempotencyKey = req.get("Idempotency-Key");
+
+if (
+    typeof idempotencyKey !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)
+) {
+    return res.status(400).json({
+        message: "A valid Idempotency-Key UUID is required",
+    });
+}
+
+//Generate the request hash
+const requestHash = createRequestHash({
+    groupId,
+    requesterId,
+    description: description.trim(),
+    total_amount_paise,
+    paid_by_user_id,
+    participants,
+});
 
     try {
         // 7. Transaction with retry helper function
          const result = await withTransactionRetry(async (client) => {
+         
+        //Claim key 
+     const idempotencyResult = await claimIdempotencyKey(client, {
+    userId: requesterId,
+    operation: "create_expense",
+    idempotencyKey,
+    requestHash,
+});
+
+if (idempotencyResult.isReplay) {
+    return {
+        isReplay: true as const,
+        response: idempotencyResult.response,
+    };
+}
+
+if (!("id" in idempotencyResult)) {
+    throw new RequestError(
+        409,
+        "Idempotency key was already used with a different request"
+    );
+}
+
+const idempotencyRecordId = idempotencyResult.id;
 
         // 8. Check whether group exists and add Group-level Lock
         const groupResult = await client.query(
@@ -226,18 +276,32 @@ export async function createExpense(req: Request, res: Response) {
         }
 
         // 14. Commit only after all inserts succeed
-        return {
-            expense,
-            splits,
-        };
+        const responseBody = {
+    message: "Expense created successfully",
+    expense,
+    splits,
+};
+
+await completeIdempotencyKey(
+    client,
+    idempotencyRecordId,
+    201,
+    responseBody
+);
+
+return {
+    isReplay: false as const,
+    response: {
+        status: 201,
+        body: responseBody,
+    },
+};
 
         });
 
-        return res.status(201).json({
-            message: "Expense created successfully",
-            expense: result.expense,
-            splits: result.splits,
-        });
+       return res
+    .status(result.response.status)
+    .json(result.response.body);
 
     } catch (error) {
         if (error instanceof RequestError) {
