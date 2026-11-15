@@ -1,10 +1,12 @@
-
 import type { Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import { pool } from "../config/db.js"
+import { pool } from "../config/db.js";
 import type { LoginRequestBody, RegisterRequestBody } from "../types/auth.types.js";
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Registration Logic
 export async function registerUser(
     req: Request<{}, {}, RegisterRequestBody>,
     res: Response
@@ -12,62 +14,79 @@ export async function registerUser(
     try {
         const { username, email, password } = req.body;
 
-        //throw new Error("Intentional registration error for testing");
-
-        1. //Validate required fields
-        if (typeof username !== "string" ||
+        // 1. Validate required fields and types
+        if (
+            typeof username !== "string" ||
             typeof email !== "string" ||
             typeof password !== "string" ||
             !username.trim() ||
             !email.trim() ||
             !password
         ) {
-            return res.status(400).json
-                ({
-                    message: "Username, email, and password are required.",
-                });
-
+            return res.status(400).json({
+                message: "Username, email, and password are required.",
+            });
         }
+
         const cleanUsername = username.trim();
         const cleanEmail = email.trim().toLowerCase();
 
-        // 2. Check whether the username or email already exists and some validations 
+        // 2. Validate email format
+        if (!EMAIL_REGEX.test(cleanEmail)) {
+            return res.status(400).json({
+                message: "Please enter a valid email address.",
+            });
+        }
+
+        // 3. Validate username length
+        if (cleanUsername.length < 3 || cleanUsername.length > 50) {
+            return res.status(400).json({
+                message: "Username must be between 3 and 50 characters long.",
+            });
+        }
+
+        // 4. Validate password length (before hitting the database)
+        if (password.length < 8) {
+            return res.status(400).json({
+                message: "Password must be at least 8 characters long.",
+            });
+        }
+
+        if (password.length > 72) {
+            return res.status(400).json({
+                message: "Password must not exceed 72 characters.",
+            });
+        }
+
+        // 5. Check if username or email already exists
         const existingUser = await pool.query(
             `SELECT user_id
-        FROM users
-        WHERE username = $1 OR email = $2
-        LIMIT 1`,
+             FROM users
+             WHERE username = $1 OR email = $2
+             LIMIT 1`,
             [cleanUsername, cleanEmail]
         );
 
         if (existingUser.rows.length > 0) {
             return res.status(409).json({
-                message: "Username or email already exist!"
+                message: "Username or email already exists.",
             });
         }
 
-        //More validations on password
-        if (password.length < 8) {
-            return res.status(400).json({
-                message: "password length must be minimum 8 !"
-            })
-        }
-
-
-        3.//hash the password
+        // 6. Hash the password
         const hashedPassword = await bcrypt.hash(password, 12);
 
-        //4.Insert the new user in Database 
+        // 7. Insert the new user into the database
         const result = await pool.query(
-            `INSERT INTO users(username, email, hashed_password)
-        VALUES($1, $2, $3)
-        RETURNING user_id, username, email, created_at`,
+            `INSERT INTO users (username, email, hashed_password)
+             VALUES ($1, $2, $3)
+             RETURNING user_id, username, email, created_at`,
             [cleanUsername, cleanEmail, hashedPassword]
         );
 
-        //5.Send the response
+        // 8. Send success response
         return res.status(201).json({
-            message: "User is created successfully!",
+            message: "User created successfully!",
             user: result.rows[0],
         });
     } catch (error) {
@@ -79,54 +98,62 @@ export async function registerUser(
             error.code === "23505"
         ) {
             return res.status(409).json({
-                error: "A user with these details already exists.",
+                message: "A user with these details already exists.",
             });
         }
         return res.status(500).json({
-            message: " An unexpected error occurred during registration."
+            message: "An unexpected error occurred during registration.",
         });
-
     }
 }
 
-
-//Login Logic
+// Login Logic
 export async function loginUser(
     req: Request<{}, {}, LoginRequestBody>,
     res: Response
 ) {
     try {
         const { email, password } = req.body;
-        const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
 
-        //Validate the fields
+        // 1. Validate required fields
         if (
-             typeof email !== "string" ||
-              !email.trim() ||
+            typeof email !== "string" ||
+            !email.trim() ||
             typeof password !== "string" ||
-              !password
+            !password
         ) {
             return res.status(400).json({
-                message: "Enter valid email and password!"
-            })
+                message: "Email and password are required.",
+            });
         }
 
+        const cleanEmail = email.trim().toLowerCase();
+
+        // 2. Validate email format
+        if (!EMAIL_REGEX.test(cleanEmail)) {
+            return res.status(400).json({
+                message: "Please enter a valid email address.",
+            });
+        }
+
+        // 3. Find user by email
         const existingEmail = await pool.query(
-            `SELECT user_id, email, hashed_password
-                FROM users
-                WHERE email = $1`,
+            `SELECT user_id, username, email, hashed_password
+             FROM users
+             WHERE email = $1
+             LIMIT 1`,
             [cleanEmail]
         );
 
         if (existingEmail.rows.length === 0) {
             return res.status(401).json({
-                message: "invalid email or password"
+                message: "Invalid email or password.",
             });
         }
 
         const user = existingEmail.rows[0];
 
-
+        // 4. Compare password hash
         const passwordMatched = await bcrypt.compare(
             password,
             user.hashed_password
@@ -134,63 +161,59 @@ export async function loginUser(
 
         if (!passwordMatched) {
             return res.status(401).json({
-                message: "Invalid email or password",
+                message: "Invalid email or password.",
             });
-
         }
 
-        //retrieve and validate your environment secret:
+        // 5. Retrieve and validate JWT secret
         const jwtSecret = process.env.JWT_ACCESS_SECRET;
-
-        if(!jwtSecret){
+        if (!jwtSecret) {
             throw new Error("JWT_ACCESS_SECRET is not configured");
         }
 
-        //generate the access token:
+        // 6. Generate access token
         const accessToken = jwt.sign(
-            {userId: user.user_id },
+            { userId: user.user_id },
             jwtSecret,
-            {expiresIn: "15m" }
+            { expiresIn: "15m" }
         );
 
-
+        // 7. Set cookie
         res.cookie("accessToken", accessToken, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === "production",
-          sameSite: "lax",
-          path: "/",
-          maxAge: 15 * 60 * 1000,
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            path: "/",
+            maxAge: 15 * 60 * 1000,
         });
 
+        // 8. Return success response with user profile
         return res.status(200).json({
-            message: "Login successful"
+            message: "Login successful",
+            user: {
+                userId: user.user_id,
+                username: user.username,
+                email: user.email,
+            },
         });
-
-        
-       
     } catch (error) {
-         console.error("Login Error: ", error); 
+        console.error("Login Error:", error);
         return res.status(500).json({
-            error: "An unexpected error occurred during login."
+            message: "An unexpected error occurred during login.",
         });
-
-
-
     }
-
 }
 
-export async function logoutUser(req: Request, res: Response){
-res.clearCookie("accessToken", {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite : "lax",
-    path: "/",
-});
+// Logout Logic
+export async function logoutUser(req: Request, res: Response) {
+    res.clearCookie("accessToken", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        path: "/",
+    });
 
-return res.status(200).json({
-    message: "Logout successful!",
-});
+    return res.status(200).json({
+        message: "Logout successful!",
+    });
 }
-
-

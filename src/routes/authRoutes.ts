@@ -10,9 +10,9 @@ router.post("/register", registerUser);
 router.post("/login", loginUser);
 //GET  /api/auth/me
 router.get("/me", authMiddleware, (req, res) => {
-  return res.status(200).json({
-    userId: req.user!.userId,
-  });
+    return res.status(200).json({
+        userId: req.user!.userId,
+    });
 });
 //POST /api/auth/logout
 router.post("/logout", logoutUser);

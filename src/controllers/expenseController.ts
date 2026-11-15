@@ -1,3 +1,5 @@
+import type { Pool } from "pg";
+import { testPool } from "../config/testDb.js";
 import type { Request, Response } from "express";
 import { pool } from "../config/db.js";
 import { fetchGroupBalances } from "../services/balanceService.js";
@@ -20,6 +22,14 @@ class RequestError extends Error {
 }
 
 export async function createExpense(req: Request, res: Response) {
+    return createExpenseWithPool(req, res, pool);
+}
+
+export async function createExpenseWithPool(
+    req: Request,
+    res: Response,
+    connectionPool: Pool
+) {
     //Read the group ID
     const rawGroupId = req.params.groupId;
 
@@ -297,7 +307,7 @@ return {
     },
 };
 
-        });
+        }, 3, connectionPool);
 
        return res
     .status(result.response.status)
@@ -610,8 +620,15 @@ export async function getSettlementSuggestions(req: Request, res: Response) {
 
 }
 
-
 export async function recordSettlement(req: Request, res: Response) {
+    return recordSettlementWithPool(req, res, pool);
+}
+
+export async function recordSettlementWithPool(
+    req: Request, 
+    res: Response,
+    connectionPool: Pool
+) {
     const rawGroupId = req.params.groupId;
 
     if (
@@ -652,102 +669,161 @@ export async function recordSettlement(req: Request, res: Response) {
             message: "amount_paise must be a positive safe integer",
         });
     }
-
+    
+    //Self settlement Validation
     if (to_user_id === userId) {
         return res.status(400).json({
             message: "You cannot settle with yourself",
         });
     }
 
-    try {
-        const settlement = await withTransactionRetry(async (client) => {
+    const idempotencyKey = req.get("Idempotency-Key");
 
-            // 1. Check whether the group exists
-            const groupExist = await client.query(
-                `SELECT 1
-                 FROM "group"
-                 WHERE group_id = $1
-                  FOR UPDATE`,
-                [groupId]
-            );
+    
+if (
+    !idempotencyKey ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)
+) {
+    return res.status(400).json({
+        message: "A valid Idempotency-Key header is required",
+    });
+}
 
-            if (groupExist.rowCount === 0) {
-                throw new RequestError(404,"Group does not exist");
-            }
+const requestHash = createRequestHash({
+    groupId,
+    requesterId: userId,
+    to_user_id,
+    amount_paise,
+});
 
-            // 2. Lock both active membership rows
-            const lockMembers = await client.query(
-                `SELECT user_id
-                 FROM member_group AS mg
-                 WHERE mg.group_id = $1
-                   AND mg.user_id = ANY($2::int[])
-                   AND mg.is_active = TRUE
-                 ORDER BY user_id
-                 FOR UPDATE`,
-                [groupId, [userId, to_user_id]]
-            );
+    
+       try {
+    const result = await withTransactionRetry(async (client) => {
 
-            if (lockMembers.rowCount !== 2) {
-                throw new RequestError(
-                    403,
-                    "Both users must belong to the group",
-                    
-                );
-            }
-
-            // 3. Calculate current bilateral outstanding debt
-            const outstandingDebt = await fetchBilateralDebt(
-                client,
-                groupId,
-                userId,
-                to_user_id
-            );
-
-            if (outstandingDebt <= 0) {
-                throw new RequestError(
-                    400,
-                    "No outstanding debt in this direction",
-                    
-                );
-            }
-
-            if (amount_paise > outstandingDebt) {
-                throw new RequestError(
-                    400,
-                    "Payment exceeds outstanding debt",
-                    
-                );
-            }
-
-            // 4. Record settlement
-            const settlementResult = await client.query(
-                `INSERT INTO settlements
-                    (group_id, from_user_id, to_user_id, amount_paise)
-                 VALUES ($1, $2, $3, $4)
-                 RETURNING *`,
-                [groupId, userId, to_user_id, amount_paise]
-            );
-
-            return settlementResult.rows[0];
+        // 1. Claim idempotency key
+        const claim = await claimIdempotencyKey(client, {
+            userId,
+            operation: "record_settlement",
+            idempotencyKey,
+            requestHash,
         });
 
-        // The helper has committed successfully before reaching here.
-        return res.status(201).json({
-            message: "Settlement recorded successfully",
-            settlement,
-        });
-
-    } catch (error) {
-        if (error instanceof RequestError) {
-            return res.status(error.status).json({
-                message: error.message,
-            });
+        // 2. Return original response if this is a replay
+        if (claim.isReplay) {
+            return {
+                status: claim.response.status,
+                body: claim.response.body,
+            };
         }
 
-        console.error("Record settlement error:", error);
+        // 3. Handle key reuse with a different payload
+        if ("conflict" in claim) {
+            return {
+                status: 409,
+                body: {
+                    message: "Idempotency key already used with a different request",
+                },
+            };
+        }   
 
-        return res.status(500).json({
-            message: "Failed to record settlement",
+        const idempotencyRecordId = claim.id;
+
+        // 4. Check whether the group exists
+        const groupExist = await client.query(
+            `SELECT 1
+             FROM "group"
+             WHERE group_id = $1
+             FOR UPDATE`,
+            [groupId]
+        );
+
+        if (groupExist.rowCount === 0) {
+            throw new RequestError(404, "Group does not exist");
+        }
+
+        // 5. Lock both active membership rows
+        const lockMembers = await client.query(
+            `SELECT user_id
+             FROM member_group AS mg
+             WHERE mg.group_id = $1
+               AND mg.user_id = ANY($2::int[])
+               AND mg.is_active = TRUE
+             ORDER BY user_id
+             FOR UPDATE`,
+            [groupId, [userId, to_user_id]]
+        );
+
+        if (lockMembers.rowCount !== 2) {
+            throw new RequestError(
+                403,
+                "Both users must belong to the group"
+            );
+        }
+
+        // 6. Calculate current bilateral outstanding debt
+        const outstandingDebt = await fetchBilateralDebt(
+            client,
+            groupId,
+            userId,
+            to_user_id
+        );
+
+        if (outstandingDebt <= 0) {
+            throw new RequestError(
+                400,
+                "No outstanding debt in this direction"
+            );
+        }
+
+        if (amount_paise > outstandingDebt) {
+            throw new RequestError(
+                400,
+                "Payment exceeds outstanding debt"
+            );
+        }
+
+        // 7. Insert settlement
+        const settlementResult = await client.query(
+            `INSERT INTO settlements
+                (group_id, from_user_id, to_user_id, amount_paise)
+             VALUES ($1, $2, $3, $4)
+             RETURNING *`,
+            [groupId, userId, to_user_id, amount_paise]
+        );
+
+        const responseBody = {
+            message: "Settlement recorded successfully",
+            settlement: settlementResult.rows[0],
+        };
+
+        // 8. Store original response before committing
+        await completeIdempotencyKey(
+            client,
+            idempotencyRecordId,
+            201,
+            responseBody
+        );
+
+        return {
+            status: 201,
+            body: responseBody,
+        };
+
+    }, 3, connectionPool);
+
+    return res.status(result.status).json(result.body);
+
+} catch (error) {
+    if (error instanceof RequestError) {
+        return res.status(error.status).json({
+            message: error.message,
         });
     }
+
+    console.error("Record settlement error:", error);
+
+    return res.status(500).json({
+        message: "Failed to record settlement",
+    });
+}
 }

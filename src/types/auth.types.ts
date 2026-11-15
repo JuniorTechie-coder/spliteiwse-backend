@@ -1,16 +1,14 @@
 // Payload sent by frontend during registration
-//Registration Interface
+// Registration Interface
 export interface RegisterRequestBody {
-  username: string;        // We will map this to database column 'username'
+  username: string; // Database column 'username'
   email: string;
   password: string;
 }
 
-//Login Interface
+// Login Interface
 export interface LoginRequestBody {
-  email: string,
+  email: string;
   password: string;
 }
-
-
 
